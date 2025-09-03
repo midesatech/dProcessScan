@@ -1,0 +1,33 @@
+spring:
+  datasource:
+    url: jdbc:mariadb://localhost:3306/mdt?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true
+    username: mdt
+    password: mdtpass
+  jpa:
+    hibernate:
+      ddl-auto: none
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.MariaDBDialect
+    open-in-view: false
+logging:
+  file:
+    name: logs/app.log
+  level:
+    root: INFO
+    com.example.mdt: DEBUG
+mqtt:
+  broker-url: tcp://broker.emqx.io
+  client-id: mdt-scan-consumer
+  username:
+  password:
+  topic-pass: mdt/pass
+  topic-ack: mdt/ack
+  qos: 1
+  clean-start: true
+
+
+flyway:
+  enabled: true
+  locations: classpath:db/migration
+

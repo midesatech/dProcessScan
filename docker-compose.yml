@@ -1,0 +1,28 @@
+services:
+  mariadb:
+    image: mariadb:11
+    environment:
+      - MARIADB_ROOT_PASSWORD=root
+      - MARIADB_ROOT_HOST=%            # permite que root conecte desde fuera
+      - MARIADB_DATABASE=mdt           # BD que usará la app
+      - MARIADB_USER=mdt               # usuario de aplicación (opcional pero recomendado)
+      - MARIADB_PASSWORD=mdtpass
+    ports:
+      - "3306:3306"
+    volumes:
+      - mdt_dbdata:/var/lib/mysql      # volumen nombrado (fácil de resetear)
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+volumes:
+  mdt_dbdata:

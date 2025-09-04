@@ -1,14 +1,21 @@
 spring:
+  flyway:
+    enabled: false
+    locations: classpath:db/migration
   datasource:
+    hikari:
+      initializationFailTimeout: 0
+      connectionTimeout: 30000
+      validationTimeout: 5000
     url: jdbc:mariadb://localhost:3306/mdt?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true
     username: mdt
     password: mdtpass
   jpa:
+    database-platform: org.hibernate.dialect.MariaDBDialect
     hibernate:
       ddl-auto: none
     properties:
-      hibernate:
-        dialect: org.hibernate.dialect.MariaDBDialect
+      hibernate.boot.allow_jdbc_metadata_access: false
     open-in-view: false
 logging:
   file:
@@ -17,7 +24,7 @@ logging:
     root: INFO
     com.example.mdt: DEBUG
 mqtt:
-  broker-url: tcp://broker.emqx.io
+  broker-url: tcp://localhost:1883
   client-id: mdt-scan-consumer
   username:
   password:
@@ -25,9 +32,13 @@ mqtt:
   topic-ack: mdt/ack
   qos: 1
   clean-start: true
+  reconnect:
+    check-interval-ms: 5000
 
 
-flyway:
+
+backlog:
   enabled: true
-  locations: classpath:db/migration
-
+  dir: data/backlog
+  drain-interval-ms: 5000
+  max-per-cycle: 50

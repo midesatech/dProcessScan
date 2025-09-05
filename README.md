@@ -23,3 +23,9 @@ mosquitto_pub -t mdt/pass -m '{"DATATYPE":"SCAN","OBJECT":{"STAGE":"99","DEVICE"
 - Las migraciones viven en `src/main/resources/db/migration`.
 - Ya incluí `V1__init_schema.sql` basado en tu `schema.sql`.
 - Flyway corre automáticamente al inicio (**antes** de JPA) porque `spring.jpa.hibernate.ddl-auto=none`.
+
+
+## Run
+```bash
+ java -Dspring.profiles.active=prod -jar mdt-mqtt-spring-hex-0.1.0.jar
+```

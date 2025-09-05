@@ -1,0 +1,21 @@
+spring:
+  config:
+    activate:
+      on-profile: prod
+
+  datasource:
+    url: ${DB_URL}
+    username: ${DB_USER}
+    password: ${DB_PASSWORD}
+    hikari:
+      initializationFailTimeout: 0
+      connectionTimeout: ${DB_CONN_TIMEOUT_MS}
+      validationTimeout: ${DB_VALIDATION_TIMEOUT_MS}
+
+mqtt:
+  broker-url: ${MQTT_BROKER_URL}
+  client-id: ${MQTT_CLIENT_ID}
+  username: ${MQTT_USERNAME}
+  password: ${MQTT_PASSWORD}
+  topic-pass: ${MQTT_TOPIC_PASS}
+  topic-ack:  ${MQTT_TOPIC_ACK}

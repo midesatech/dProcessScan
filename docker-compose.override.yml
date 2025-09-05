@@ -1,0 +1,49 @@
+version: "3.9"
+
+services:
+  app:
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+
+      # DB (obligatorias)
+      DB_URL: ${DB_URL}
+      DB_USER: ${DB_USER}
+      DB_PASSWORD: ${DB_PASSWORD}
+      DB_CONN_TIMEOUT_MS: ${DB_CONN_TIMEOUT_MS}
+      DB_VALIDATION_TIMEOUT_MS: ${DB_VALIDATION_TIMEOUT_MS}
+
+      # MQTT (obligatorias)
+      MQTT_BROKER_URL: ${MQTT_BROKER_URL}
+      MQTT_CLIENT_ID: ${MQTT_CLIENT_ID}
+      MQTT_USERNAME: ${MQTT_USERNAME}
+      MQTT_PASSWORD: ${MQTT_PASSWORD}
+      MQTT_TOPIC_PASS: ${MQTT_TOPIC_PASS}
+      MQTT_TOPIC_ACK: ${MQTT_TOPIC_ACK}
+
+      # Logging
+      LOG_LEVEL_ROOT: ${LOG_LEVEL_ROOT}
+      LOG_LEVEL_APP: ${LOG_LEVEL_APP}
+      LOG_FILE: ${LOG_FILE}
+
+      # Flyway
+      FLYWAY_ENABLED: ${FLYWAY_ENABLED}
+
+    ports:
+      - "${APP_PORT:-8080}:8080"
+    volumes:
+      - ${APP_LOGS_DIR:-./logs}:/logs
+
+  mariadb:
+    environment:
+      MARIADB_ROOT_PASSWORD: ${MARIADB_ROOT_PASSWORD}
+      MARIADB_DATABASE: ${MARIADB_DATABASE}
+      MARIADB_USER: ${MARIADB_USER}
+      MARIADB_PASSWORD: ${MARIADB_PASSWORD}
+    volumes:
+      - ${DB_DATA_DIR:-./data/mariadb}:/var/lib/mysql
+
+  mosquitto:
+    volumes:
+      - ${MOSQUITTO_CONFIG:-./mosquitto.conf}:/mosquitto/config/mosquitto.conf:ro
+      - ${MOSQUITTO_DATA_DIR:-./data/mosquitto}:/mosquitto/data
+      - ${MOSQUITTO_LOGS_DIR:-./logs/mosquitto}:/mosquitto/log

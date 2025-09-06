@@ -177,6 +177,7 @@ public class MqttListenerService implements MqttCallback {
                     obj.path("STAGE").asText(null),
                     obj.path("DEVICE").asText(null),
                     obj.path("MACHINE").asText(null),
+                    obj.path("VERSION").asText(null),
                     csnList
             );
 

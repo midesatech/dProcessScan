@@ -56,12 +56,13 @@ public class BacklogDrainService {
                 String stage = obj.path("STAGE").asText(null);
                 String device = obj.path("DEVICE").asText(null);
                 String machine = obj.path("MACHINE").asText(null);
+                String version = obj.path("VERSION").asText(null);
                 List<String> csn = new ArrayList<>();
                 if (obj.get("CSN").isArray()) {
                     obj.get("CSN").forEach(n -> csn.add(n.asText()));
                 }
 
-                Scan scan = new Scan("SCAN", stage, device, machine, csn);
+                Scan scan = new Scan("SCAN", stage, device, machine, version, csn);
                 int inserted = useCase.process(scan);
                 log.info("Backlog drained: {} inserted from {}", inserted, p.getFileName());
                 store.delete(p);

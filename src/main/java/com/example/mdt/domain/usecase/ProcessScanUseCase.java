@@ -35,7 +35,12 @@ public class ProcessScanUseCase {
         for (String csn : scan.csn()){
             if (csn == null || csn.length() < 2) continue;
             Integer rssi = parseRssiFromCsn(csn);
-            var det = new Deteccion(lectorId, ubicacionId, csn, rssi, scan.machine(), LocalDateTime.now());
+            var det = new Deteccion(
+                    lectorId,
+                    ubicacionId,
+                    csn, rssi,
+                    scan.machine(),
+                    LocalDateTime.now(), scan.version());
             gateway.save(det);
             count++;
         }

@@ -76,6 +76,7 @@ CREATE TABLE detecciones_tags (
   epc           VARCHAR(64) NOT NULL,
   rssi          INT NULL,
   machine       VARCHAR(100) NULL,
+  version       VARCHAR(20) NULL,
   created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT fk_detecciones_lector

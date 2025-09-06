@@ -13,7 +13,11 @@ import org.eclipse.paho.mqttv5.client.persist.MemoryPersistence;
 import org.eclipse.paho.mqttv5.common.MqttMessage;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import com.example.mdt.infrastructure.adapter.db.DbHealthService;
+import com.example.mdt.infrastructure.adapter.backlog.BacklogStore;
+
 import org.springframework.stereotype.Component;
+import org.springframework.scheduling.annotation.Scheduled;
 
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
@@ -21,10 +25,10 @@ import jakarta.annotation.PreDestroy;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
-
 
 @Component
 public class MqttListenerService implements MqttCallback {
@@ -33,6 +37,8 @@ public class MqttListenerService implements MqttCallback {
 
     private final MqttProps props;
     private final ProcessScanUseCase useCase;
+    private final DbHealthService dbHealth;
+    private final BacklogStore backlogStore;
     private final ObjectMapper mapper = new ObjectMapper();
     private MqttAsyncClient client;
 
@@ -42,15 +48,32 @@ public class MqttListenerService implements MqttCallback {
     private long backoffMs = 500;           // inicio (configurable)
     private final long backoffMaxMs = 10_000; // máx (configurable)
     // -------------------------
+    private final AtomicBoolean everConnected = new AtomicBoolean(false);
 
-    public MqttListenerService(MqttProps props, ProcessScanUseCase useCase) {
+    public MqttListenerService(MqttProps props, ProcessScanUseCase useCase, DbHealthService dbHealth, BacklogStore backlogStore) {
         this.props = props;
         this.useCase = useCase;
+        this.dbHealth = dbHealth;
+        this.backlogStore = backlogStore;
     }
 
     @PostConstruct
-    public void start() throws Exception {
-        connectAndSubscribe();
+    public void start() {
+        try {
+            ensureClient(); // crea client y setea callback (this)
+            MqttConnectionOptions opts = new MqttConnectionOptions();
+            opts.setCleanStart(props.cleanStart());
+            try { opts.setAutomaticReconnect(true); } catch (Throwable ignored) {}
+
+            if (props.username() != null && !props.username().isBlank()) opts.setUserName(props.username());
+            if (props.password() != null && !props.password().isBlank())
+                opts.setPassword(props.password().getBytes(StandardCharsets.UTF_8));
+
+            log.info("Connecting to MQTT broker {} ...", props.brokerUrl());
+            client.connect(opts); // si falla, cae al catch y NO tumba el contexto
+        } catch (Exception e) {
+            log.warn("Initial MQTT connect failed: {}", e.getMessage());
+        }
     }
 
     private void connectAndSubscribe() throws Exception {
@@ -91,11 +114,7 @@ public class MqttListenerService implements MqttCallback {
     public void stop() throws Exception {
         scheduler.shutdownNow();
         if (client != null) {
-            try {
-                client.disconnect();
-            } finally {
-                client.close();
-            }
+            try { client.disconnect(); } finally { client.close(); }
         }
     }
 
@@ -133,35 +152,32 @@ public class MqttListenerService implements MqttCallback {
         log.info("Message arrived on {}: {}", topic, body);
         try {
             JsonNode root = mapper.readTree(body);
-
-            // Validate DATATYPE
             String datatype = root.path("DATATYPE").asText(null);
             if (datatype == null || !"SCAN".equalsIgnoreCase(datatype)) {
                 log.warn("Ignoring message: unsupported DATATYPE='{}' on topic={}", datatype, topic);
                 publishNegativeAck("bad_datatype");
                 return;
             }
-
-            JsonNode obj = root.path("OBJECT");
-            if (obj.isMissingNode() || obj.isNull()) {
-                log.warn("Ignoring SCAN: missing OBJECT node (topic={})", topic);
-                publishNegativeAck("missing_object");
-                return;
-            }
+            JsonNode obj  = root.path("OBJECT");
 
             List<String> csnList = new ArrayList<>();
             if (obj.has("CSN") && obj.get("CSN").isArray()) {
                 for (JsonNode n : obj.get("CSN")) csnList.add(n.asText());
-            } else {
-                log.warn("Ignoring SCAN: OBJECT.CSN is missing or not an array (topic={})", topic);
-                publishNegativeAck("invalid_csn");
+            }
+
+            if (!dbHealth.isAvailable()) {
+                log.warn("DB unavailable, enqueuing backlog and NACK (topic={})", topic);
+                try { if (backlogStore.isEnabled()) backlogStore.enqueue(body, "db_unavailable"); } catch (Exception ignore) {}
+                publishNegativeAck("db_unavailable");
                 return;
             }
+
             Scan scan = new Scan(
                     root.path("DATATYPE").asText(null),
                     obj.path("STAGE").asText(null),
                     obj.path("DEVICE").asText(null),
                     obj.path("MACHINE").asText(null),
+                    obj.path("VERSION").asText(null),
                     csnList
             );
 
@@ -179,10 +195,21 @@ public class MqttListenerService implements MqttCallback {
                 client.publish(props.topicAck(), msg);
                 log.debug("Published ACK to {}: {}", props.topicAck(), ack);
             }
+        } catch (org.springframework.dao.DataIntegrityViolationException ex) {
+            // Violaciones FK/NOT NULL/etc → NACK explícito
+            String detail = (ex.getMostSpecificCause() != null) ? ex.getMostSpecificCause().getMessage() : ex.getMessage();
+            log.warn("Data integrity error while processing SCAN: {}", detail);
+            publishNegativeAck("fk_violation_or_constraint");
+        } catch (IllegalArgumentException iae) {
+            // Validaciones previas del use case (unknown_device / unknown_stage)
+            log.warn("Validation failed: {}", iae.getMessage());
+            publishNegativeAck(iae.getMessage()); // p.ej. "unknown_device"
         } catch (Exception e) {
             log.error("Failed to process message", e);
+            publishNegativeAck("processing_error");
         }
     }
+
 
     @Override
     public void deliveryComplete(org.eclipse.paho.mqttv5.client.IMqttToken token) { /* no-op */ }
@@ -218,17 +245,17 @@ public class MqttListenerService implements MqttCallback {
             reconnecting = false; // para poder volver a programar
             scheduleReconnect();
         }
-
     }
+
 
     private void publishNegativeAck(String reason) {
         try {
             if (props.topicAck() == null || props.topicAck().isBlank()) return;
-            var obj = mapper.createObjectNode();
-            obj.put("ok", false);
-            obj.put("reason", reason);
-            String payload = mapper.writeValueAsString(obj);
-            var msg = new org.eclipse.paho.mqttv5.common.MqttMessage(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            ObjectNode ack = mapper.createObjectNode();
+            ack.put("ok", false);
+            ack.put("reason", reason);
+            String payload = mapper.writeValueAsString(ack);
+            MqttMessage msg = new MqttMessage(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
             msg.setQos(props.qos());
             client.publish(props.topicAck(), msg);
             log.debug("Published NACK to {}: {}", props.topicAck(), payload);
@@ -236,5 +263,39 @@ public class MqttListenerService implements MqttCallback {
             log.warn("Failed to publish negative ACK: {}", e.getMessage());
         }
     }
-}
 
+    @Scheduled(fixedDelayString = "${mqtt.reconnect.check-interval-ms:5000}")
+    public void ensureConnectedTask() {
+        try {
+            ensureClient();
+            if (client.isConnected()) return;
+
+            log.info("MQTT not connected, attempting reconnect...");
+            MqttConnectionOptions opts = new MqttConnectionOptions();
+            opts.setCleanStart(props.cleanStart());
+            opts.setAutomaticReconnect(true);
+
+            client.connect(opts); // si falla, cae al catch
+            everConnected.set(true);
+
+            // Re-suscribir si no lo haces en connectComplete
+            if (props.topicPass() != null && !props.topicPass().isBlank()) {
+                client.subscribe(props.topicPass(), props.qos());
+                log.info("Re-subscribed to topic {}", props.topicPass());
+            }
+        } catch (Throwable e) {
+            log.warn("MQTT reconnect attempt failed: {}", e.getMessage());
+        }
+    }
+
+    private synchronized void ensureClient() throws Exception {
+        if (client == null) {
+            // Usa tus props actuales
+            client = new MqttAsyncClient(props.brokerUrl(), props.clientId(), new MemoryPersistence());
+
+            // Si tienes callbacks personalizados, configúralos aquí.
+            // Por ejemplo, onDisconnect / connectComplete / messageArrived ya los tienes en tu clase.
+            client.setCallback(this);
+        }
+    }
+}

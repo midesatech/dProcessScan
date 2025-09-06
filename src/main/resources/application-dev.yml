@@ -1,0 +1,22 @@
+spring:
+  config:
+    activate:
+      on-profile: dev
+
+  datasource:
+    url: ${DB_URL:jdbc:mariadb://localhost:3306/mdt?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true}
+    username: ${DB_USER:root}
+    password: ${DB_PASSWORD:root}
+    hikari:
+      # No tumbar contexto si DB no responde al arrancar
+      initializationFailTimeout: 0
+      connectionTimeout: ${DB_CONN_TIMEOUT_MS:30000}
+      validationTimeout: ${DB_VALIDATION_TIMEOUT_MS:5000}
+
+mqtt:
+  broker-url: ${MQTT_BROKER_URL:tcp://localhost:1883}
+  client-id: ${MQTT_CLIENT_ID:mdt-scan-consumer-dev}
+  username: ${MQTT_USERNAME:}
+  password: ${MQTT_PASSWORD:}
+  topic-pass: ${MQTT_TOPIC_PASS:mdt/pass}
+  topic-ack:  ${MQTT_TOPIC_ACK:mdt/ack}

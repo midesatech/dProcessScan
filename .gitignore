@@ -46,3 +46,5 @@ flyway.conf
 ### Others ###
 *.tmp
 *.swp
+data
+data/

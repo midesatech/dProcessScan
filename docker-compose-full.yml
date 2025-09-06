@@ -1,0 +1,64 @@
+services:
+  mariadb:
+    image: mariadb:11
+    container_name: mdt-mariadb
+    restart: always
+    environment:
+      MARIADB_ROOT_PASSWORD: root
+      MARIADB_DATABASE: mdt
+      MARIADB_USER: mdt_user
+      MARIADB_PASSWORD: mdt_pass
+    ports:
+      - "3306:3306"
+    volumes:
+      - ./db/schema.sql:/docker-entrypoint-initdb.d/00-schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mariadb-admin", "ping", "-h", "localhost", "-u", "root", "-proot"]
+      interval: 5s
+      timeout: 6s
+      retries: 10
+      start_period: 40s
+
+  mosquitto:
+    image: eclipse-mosquitto:2
+    container_name: mdt-mosquitto
+    restart: always
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto.conf:/mosquitto/config/mosquitto.conf:ro
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mdt-app
+    restart: always
+    depends_on:
+      mariadb:
+        condition: service_healthy
+      mosquitto:
+        condition: service_started
+    environment:
+      SPRING_PROFILES_ACTIVE: dev
+
+      # DB
+      DB_URL: jdbc:mariadb://mariadb:3306/mdt?useUnicode=true&characterEncoding=utf8&useSSL=false&allowPublicKeyRetrieval=true
+      DB_USER: mdt_user
+      DB_PASSWORD: mdt_pass
+
+      # MQTT
+      MQTT_BROKER_URL: tcp://mosquitto:1883
+      MQTT_CLIENT_ID: mdt-scan-consumer-dev
+      MQTT_TOPIC_PASS: mdt/pass
+      MQTT_TOPIC_ACK: mdt/ack
+
+      # Opcionales con defaults
+      LOG_LEVEL_ROOT: INFO
+      LOG_LEVEL_APP: DEBUG
+      LOG_FILE: logs/app.log
+
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./logs:/logs

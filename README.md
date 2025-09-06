@@ -55,3 +55,17 @@ mosquitto_pub -t mdt/pass -m '{"DATATYPE":"SCAN","OBJECT":{"STAGE":"99","DEVICE"
  export LOG_FILE=/var/log/mdt/app.log
  export FLYWAY_ENABLED=false
 ```
+
+## Payload example
+
+```json
+ {
+   "DATATYPE": "SCAN",
+   "OBJECT": {
+     "STAGE": "10",
+     "DEVICE": "101-AB",
+     "MACHINE": "RECEP-1",
+     "CSN": ["AAAAAAAABB11112233445511", "11223344556677889900AA"]
+   }
+ }
+```

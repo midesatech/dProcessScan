@@ -25,11 +25,18 @@ mosquitto_pub -t mdt/pass -m '{"DATATYPE":"SCAN","OBJECT":{"STAGE":"99","DEVICE"
 - Flyway corre automáticamente al inicio (**antes** de JPA) porque `spring.jpa.hibernate.ddl-auto=none`.
 
 
-## Run
+## Run in terminal
 ```bash
  java -Dspring.profiles.active=prod -jar mdt-mqtt-spring-hex-0.1.0.jar
 ```
 
+## Run in IntelliJ IDEA
+
+Put the following value in the "VM options" for dev:
+
+```
+ -Dspring.profiles.active=dev
+```
 
 ## Environment variables
 

@@ -1,11 +1,11 @@
 -- Clean CREATE schema (MySQL 8+)
 DROP TRIGGER IF EXISTS biu_empleados_tag_guard;
 DROP TRIGGER IF EXISTS bu_empleados_tag_guard;
-DROP TRIGGER IF EXISTS biu_equipment_tag_guard;
-DROP TRIGGER IF EXISTS bu_equipment_tag_guard;
+DROP TRIGGER IF EXISTS biu_product_tag_guard;
+DROP TRIGGER IF EXISTS bu_product_tag_guard;
 
 DROP TABLE IF EXISTS empleados;
-DROP TABLE IF EXISTS equipment;
+DROP TABLE IF EXISTS product;
 DROP TABLE IF EXISTS tags_uhf;
 DROP TABLE IF EXISTS ubicaciones;
 DROP TABLE IF EXISTS categorias;
@@ -25,19 +25,10 @@ CREATE TABLE user_roles (user_id BIGINT NOT NULL, role_id BIGINT NOT NULL, PRIMA
 CREATE TABLE categorias (id BIGINT PRIMARY KEY AUTO_INCREMENT, nombre VARCHAR(255) NOT NULL);
 CREATE TABLE ubicaciones (id BIGINT PRIMARY KEY AUTO_INCREMENT, nombre VARCHAR(150) NOT NULL UNIQUE);
 
-CREATE TABLE lectores_uhf (
-  id BIGINT PRIMARY KEY AUTO_INCREMENT,
-  codigo VARCHAR(64) NOT NULL UNIQUE,
-  descripcion VARCHAR(255),
-  ubicacion_id BIGINT NOT NULL,
-  CONSTRAINT fk_lectores_ubicacion
-    FOREIGN KEY (ubicacion_id) REFERENCES ubicaciones(id) ON DELETE RESTRICT
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
-
 CREATE TABLE tags_uhf (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   epc VARCHAR(64) NOT NULL,
-  tipo ENUM('EMPLEADO','EQUIPMENT') NOT NULL,
+  tipo ENUM('EMPLOYEE','EQUIPMENT', 'PRODUCT') NOT NULL,
   activo BOOLEAN NOT NULL DEFAULT 1,
   CONSTRAINT uk_taguhf_epc UNIQUE KEY (epc)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
@@ -58,15 +49,15 @@ CREATE TABLE empleados (
   CONSTRAINT fk_empleados_tag FOREIGN KEY (tag_id) REFERENCES tags_uhf(id) ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
-CREATE TABLE equipment (
+CREATE TABLE product (
   id BIGINT PRIMARY KEY AUTO_INCREMENT,
   sku     VARCHAR(64),
   nombre  VARCHAR(150),
   serie   VARCHAR(100),
   estado  VARCHAR(30),
   tag_id  BIGINT NULL,
-  CONSTRAINT uk_equipment_tag UNIQUE KEY (tag_id),
-  CONSTRAINT fk_equipment_tag FOREIGN KEY (tag_id) REFERENCES tags_uhf(id) ON DELETE SET NULL ON UPDATE CASCADE
+  CONSTRAINT uk_product_tag UNIQUE KEY (tag_id),
+  CONSTRAINT fk_product_tag FOREIGN KEY (tag_id) REFERENCES tags_uhf(id) ON DELETE SET NULL ON UPDATE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 CREATE TABLE detecciones_tags (
@@ -76,7 +67,6 @@ CREATE TABLE detecciones_tags (
   epc           VARCHAR(64) NOT NULL,
   rssi          INT NULL,
   machine       VARCHAR(100) NULL,
-  version       VARCHAR(20) NULL,
   created_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at    DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   CONSTRAINT fk_detecciones_lector
@@ -100,8 +90,8 @@ CREATE TRIGGER biu_empleados_tag_guard
 BEFORE INSERT ON empleados
 FOR EACH ROW
 BEGIN
-  IF NEW.tag_id IS NOT NULL AND EXISTS (SELECT 1 FROM equipment WHERE tag_id = NEW.tag_id) THEN
-    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Tag already assigned to an equipment';
+  IF NEW.tag_id IS NOT NULL AND EXISTS (SELECT 1 FROM product WHERE tag_id = NEW.tag_id) THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Tag already assigned to an product';
   END IF;
 END$$
 
@@ -110,13 +100,13 @@ BEFORE UPDATE ON empleados
 FOR EACH ROW
 BEGIN
   IF NEW.tag_id IS NOT NULL AND NEW.tag_id <> OLD.tag_id
-     AND EXISTS (SELECT 1 FROM equipment WHERE tag_id = NEW.tag_id) THEN
-    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Tag already assigned to an equipment';
+     AND EXISTS (SELECT 1 FROM product WHERE tag_id = NEW.tag_id) THEN
+    SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Tag already assigned to an product';
   END IF;
 END$$
 
-CREATE TRIGGER biu_equipment_tag_guard
-BEFORE INSERT ON equipment
+CREATE TRIGGER biu_product_tag_guard
+BEFORE INSERT ON product
 FOR EACH ROW
 BEGIN
   IF NEW.tag_id IS NOT NULL AND EXISTS (SELECT 1 FROM empleados WHERE tag_id = NEW.tag_id) THEN
@@ -124,8 +114,8 @@ BEGIN
   END IF;
 END$$
 
-CREATE TRIGGER bu_equipment_tag_guard
-BEFORE UPDATE ON equipment
+CREATE TRIGGER bu_product_tag_guard
+BEFORE UPDATE ON product
 FOR EACH ROW
 BEGIN
   IF NEW.tag_id IS NOT NULL AND NEW.tag_id <> OLD.tag_id

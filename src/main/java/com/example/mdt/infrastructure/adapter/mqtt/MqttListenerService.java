@@ -2,33 +2,34 @@ package com.example.mdt.infrastructure.adapter.mqtt;
 
 import com.example.mdt.domain.model.Scan;
 import com.example.mdt.domain.usecase.ProcessScanUseCase;
+import com.example.mdt.infrastructure.adapter.backlog.BacklogStore;
+import com.example.mdt.infrastructure.adapter.db.DbHealthService;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
+import jakarta.annotation.PostConstruct;
+import jakarta.annotation.PreDestroy;
 import org.eclipse.paho.mqttv5.client.MqttAsyncClient;
 import org.eclipse.paho.mqttv5.client.MqttCallback;
 import org.eclipse.paho.mqttv5.client.MqttConnectionOptions;
 import org.eclipse.paho.mqttv5.client.MqttDisconnectResponse;
 import org.eclipse.paho.mqttv5.client.persist.MemoryPersistence;
+import org.eclipse.paho.mqttv5.common.MqttException;
 import org.eclipse.paho.mqttv5.common.MqttMessage;
+import org.eclipse.paho.mqttv5.common.packet.MqttProperties;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import com.example.mdt.infrastructure.adapter.db.DbHealthService;
-import com.example.mdt.infrastructure.adapter.backlog.BacklogStore;
-
-import org.springframework.stereotype.Component;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
 
-import jakarta.annotation.PostConstruct;
-import jakarta.annotation.PreDestroy;
-
+import java.lang.management.ManagementFactory;
+import java.net.InetAddress;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.UUID;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.TimeUnit;
 
 @Component
 public class MqttListenerService implements MqttCallback {
@@ -40,110 +41,195 @@ public class MqttListenerService implements MqttCallback {
     private final DbHealthService dbHealth;
     private final BacklogStore backlogStore;
     private final ObjectMapper mapper = new ObjectMapper();
+
     private MqttAsyncClient client;
 
-    // ---- RECONNECT STATE ----
-    private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor();
-    private volatile boolean reconnecting = false;
-    private long backoffMs = 500;           // inicio (configurable)
-    private final long backoffMaxMs = 10_000; // máx (configurable)
-    // -------------------------
+    /**
+     * true once we've had at least one successful connection.
+     * After that, Paho's automatic reconnect takes over; we don't
+     * keep doing manual reconnect attempts from the @Scheduled task.
+     */
     private final AtomicBoolean everConnected = new AtomicBoolean(false);
 
-    public MqttListenerService(MqttProps props, ProcessScanUseCase useCase, DbHealthService dbHealth, BacklogStore backlogStore) {
+    /**
+     * Prevents "connect already in progress" by ensuring only one
+     * explicit connect() attempt at a time (before the first successful connect).
+     */
+    private final AtomicBoolean connecting = new AtomicBoolean(false);
+
+    public MqttListenerService(MqttProps props,
+                               ProcessScanUseCase useCase,
+                               DbHealthService dbHealth,
+                               BacklogStore backlogStore) {
         this.props = props;
         this.useCase = useCase;
         this.dbHealth = dbHealth;
         this.backlogStore = backlogStore;
     }
 
+    // -------------------------------------------------------------------------
+    // Lifecycle
+    // -------------------------------------------------------------------------
+
     @PostConstruct
     public void start() {
         try {
-            ensureClient(); // crea client y setea callback (this)
-            MqttConnectionOptions opts = new MqttConnectionOptions();
-            opts.setCleanStart(props.cleanStart());
-            try { opts.setAutomaticReconnect(true); } catch (Throwable ignored) {}
-
-            if (props.username() != null && !props.username().isBlank()) opts.setUserName(props.username());
-            if (props.password() != null && !props.password().isBlank())
-                opts.setPassword(props.password().getBytes(StandardCharsets.UTF_8));
-
-            log.info("Connecting to MQTT broker {} ...", props.brokerUrl());
-            client.connect(opts); // si falla, cae al catch y NO tumba el contexto
+            connectAndSubscribe();
         } catch (Exception e) {
-            log.warn("Initial MQTT connect failed: {}", e.getMessage());
+            log.warn("Initial MQTT connect failed: {}", e.getMessage(), e);
         }
-    }
-
-    private void connectAndSubscribe() throws Exception {
-        String clientId = (props.clientId() == null || props.clientId().isBlank())
-                ? "mdt-" + java.util.UUID.randomUUID()
-                : props.clientId();
-
-        client = new MqttAsyncClient(props.brokerUrl(), clientId, new MemoryPersistence());
-        client.setCallback(this);
-
-        MqttConnectionOptions options = new MqttConnectionOptions();
-        options.setCleanStart(props.cleanStart());
-        if (props.username() != null && !props.username().isBlank()) options.setUserName(props.username());
-        if (props.password() != null && !props.password().isBlank())
-            options.setPassword(props.password().getBytes(java.nio.charset.StandardCharsets.UTF_8));
-
-        // Si tu versión de Paho v5 lo soporta, lo activamos además del backoff manual:
-        try {
-            options.setAutomaticReconnect(true);
-        } catch (Throwable ignored) {
-            // algunas versiones no exponen esta opción en v5; nuestro backoff manual seguirá funcionando
-        }
-
-        log.info("Connecting to MQTT broker {} ...", props.brokerUrl());
-        client.connect(options).waitForCompletion();
-        subscribeAll();
-        log.info("Connected and subscribed to {}", props.topicPass());
-        // reset backoff al conectar
-        backoffMs = 500;
-        reconnecting = false;
-    }
-
-    private void subscribeAll() throws Exception {
-        client.subscribe(props.topicPass(), props.qos());
     }
 
     @PreDestroy
-    public void stop() throws Exception {
-        scheduler.shutdownNow();
-        if (client != null) {
-            try { client.disconnect(); } finally { client.close(); }
+    public void stop() {
+        try {
+            if (client != null) {
+                log.info("Disconnecting MQTT client...");
+                client.disconnect();
+                client.close();
+            }
+        } catch (Exception e) {
+            log.warn("Error while disconnecting MQTT client: {}", e.getMessage(), e);
         }
     }
 
-    // ---------- Callbacks ----------
+    /**
+     * Startup helper: while we have NEVER connected, periodically try to connect.
+     * Once a connection succeeds, {@link #everConnected} becomes true in connectComplete()
+     * and this task effectively becomes a no-op.
+     *
+     * Important: we only use this for the first connection; reconnections after
+     * that are handled by Paho's automatic reconnect.
+     */
+    @Scheduled(fixedDelayString = "${mqtt.initial-connect.check-interval-ms:5000}")
+    public void ensureInitialConnection() {
+        if (everConnected.get()) {
+            return; // we've connected at least once; auto-reconnect handles the rest
+        }
+
+        try {
+            if (client != null && client.isConnected()) {
+                everConnected.set(true);
+                return;
+            }
+            log.info("MQTT not yet connected, attempting initial connect...");
+            connectAndSubscribe();
+        } catch (Exception e) {
+            log.warn("Initial connect retry failed: {}", e.getMessage());
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // Connection / subscription
+    // -------------------------------------------------------------------------
+
+    private synchronized void connectAndSubscribe() throws Exception {
+        if (client != null && client.isConnected()) {
+            log.debug("MQTT already connected, skipping connectAndSubscribe");
+            return;
+        }
+
+        if (connecting.get()) {
+            log.debug("MQTT connect already in progress, skipping connectAndSubscribe");
+            return;
+        }
+
+        // Lazily create client if needed
+        if (client == null) {
+            String clientId = buildClientId(props);
+            client = new MqttAsyncClient(props.brokerUrl(), clientId, new MemoryPersistence());
+            client.setCallback(this);
+            log.info("Created MQTT client with clientId={}", clientId);
+        }
+
+        MqttConnectionOptions options = new MqttConnectionOptions();
+        options.setCleanStart(props.cleanStart());
+        options.setAutomaticReconnect(true);   // let Paho handle reconnects after first success
+        options.setSessionExpiryInterval(0L);  // no server-side session persistence
+        options.setKeepAliveInterval(30);      // seconds; tune if needed
+
+        if (props.username() != null && !props.username().isBlank()) {
+            options.setUserName(props.username());
+        }
+        if (props.password() != null && !props.password().isBlank()) {
+            options.setPassword(props.password().getBytes(StandardCharsets.UTF_8));
+        }
+
+        connecting.set(true);
+        try {
+            log.info("Connecting to MQTT broker {} ...", props.brokerUrl());
+            // Async connect; success/failure will be reported via callbacks.
+            client.connect(options);
+        } catch (Exception e) {
+            connecting.set(false);
+            log.warn("MQTT connect() call failed: {}", e.getMessage());
+            throw e;
+        }
+    }
+
+    private void subscribeAll() throws Exception {
+        if (client == null || !client.isConnected()) {
+            log.warn("Cannot subscribe: MQTT client is not connected");
+            return;
+        }
+
+        if (props.topicPass() != null && !props.topicPass().isBlank()) {
+            client.subscribe(props.topicPass(), props.qos());
+            log.info("Subscribed to PASS topic '{}', qos={}", props.topicPass(), props.qos());
+        } else {
+            log.warn("MQTT PASS topic is not configured; no subscriptions performed");
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // MQTT Callback
+    // -------------------------------------------------------------------------
 
     @Override
-    public void disconnected(MqttDisconnectResponse reason) {
-        log.warn("MQTT disconnected: code={} msg={}", reason.getReturnCode(), reason.getReasonString());
-        scheduleReconnect();
+    public void disconnected(MqttDisconnectResponse disconnectResponse) {
+        Integer code = disconnectResponse != null ? disconnectResponse.getReturnCode() : null;
+        String msg = disconnectResponse != null ? disconnectResponse.getReasonString() : null;
+
+        log.warn("MQTT disconnected: code={} msg={}", code, msg);
+
+        // 142 = Session taken over (duplicate ClientID)
+        if (Integer.valueOf(142).equals(code)) {
+            log.warn("MQTT disconnect reason 142 (Session taken over). " +
+                     "Another client likely connected using the same base ClientID='{}'. " +
+                     "If you are running multiple instances, ensure their MQTT_CLIENT_ID " +
+                     "values are not identical, or rely on the unique-suffix behavior.",
+                     props.clientId());
+        }
+
+        // We do NOT trigger manual reconnect here; Paho automatic reconnect handles it
+        connecting.set(false);
     }
 
     @Override
-    public void mqttErrorOccurred(org.eclipse.paho.mqttv5.common.MqttException e) {
-        log.error("MQTT error", e);
+    public void mqttErrorOccurred(MqttException e) {
+        log.error("MQTT error occurred", e);
     }
 
     @Override
     public void connectComplete(boolean reconnect, String serverURI) {
+        connecting.set(false);
+        everConnected.set(true);
+
         log.info("MQTT connectComplete: reconnect={} serverURI={}", reconnect, serverURI);
-        // En algunos casos (cleanStart=true) hay que re-suscribirse explícitamente
         try {
             if (client != null && client.isConnected()) {
                 subscribeAll();
                 log.info("Re-subscribed after connectComplete");
             }
         } catch (Exception e) {
-            log.error("Failed to resubscribe on connectComplete", e);
-            scheduleReconnect();
+            log.error("Failed to subscribe after connectComplete", e);
         }
+    }
+
+    @Override
+    public void authPacketArrived(int reasonCode, MqttProperties properties) {
+        // Optional: implement if you use enhanced auth.
+        log.debug("MQTT authPacketArrived: reasonCode={}", reasonCode);
     }
 
     @Override
@@ -158,16 +244,24 @@ public class MqttListenerService implements MqttCallback {
                 publishNegativeAck("bad_datatype");
                 return;
             }
-            JsonNode obj  = root.path("OBJECT");
+            JsonNode obj = root.path("OBJECT");
 
             List<String> csnList = new ArrayList<>();
             if (obj.has("CSN") && obj.get("CSN").isArray()) {
-                for (JsonNode n : obj.get("CSN")) csnList.add(n.asText());
+                for (JsonNode n : obj.get("CSN")) {
+                    csnList.add(n.asText());
+                }
             }
 
+            // If DB is down, enqueue to backlog and NACK
             if (!dbHealth.isAvailable()) {
                 log.warn("DB unavailable, enqueuing backlog and NACK (topic={})", topic);
-                try { if (backlogStore.isEnabled()) backlogStore.enqueue(body, "db_unavailable"); } catch (Exception ignore) {}
+                try {
+                    if (backlogStore.isEnabled()) {
+                        backlogStore.enqueue(body, "db_unavailable");
+                    }
+                } catch (Exception ignored) {
+                }
                 publishNegativeAck("db_unavailable");
                 return;
             }
@@ -190,112 +284,85 @@ public class MqttListenerService implements MqttCallback {
                 ackNode.put("inserted", inserted);
                 String ack = mapper.writeValueAsString(ackNode);
 
-                var msg = new MqttMessage(ack.getBytes(StandardCharsets.UTF_8));
-                msg.setQos(props.qos());
-                client.publish(props.topicAck(), msg);
+                MqttMessage ackMsg = new MqttMessage(ack.getBytes(StandardCharsets.UTF_8));
+                ackMsg.setQos(props.qos());
+                client.publish(props.topicAck(), ackMsg);
                 log.debug("Published ACK to {}: {}", props.topicAck(), ack);
             }
-        } catch (org.springframework.dao.DataIntegrityViolationException ex) {
-            // Violaciones FK/NOT NULL/etc → NACK explícito
-            String detail = (ex.getMostSpecificCause() != null) ? ex.getMostSpecificCause().getMessage() : ex.getMessage();
+        } catch (DataIntegrityViolationException ex) {
+            // FK/NOT NULL/etc violations → explicit NACK
+            String detail = (ex.getMostSpecificCause() != null)
+                    ? ex.getMostSpecificCause().getMessage()
+                    : ex.getMessage();
             log.warn("Data integrity error while processing SCAN: {}", detail);
             publishNegativeAck("fk_violation_or_constraint");
         } catch (IllegalArgumentException iae) {
-            // Validaciones previas del use case (unknown_device / unknown_stage)
+            // Validation from use case (e.g., unknown_device / unknown_stage)
             log.warn("Validation failed: {}", iae.getMessage());
-            publishNegativeAck(iae.getMessage()); // p.ej. "unknown_device"
+            publishNegativeAck(iae.getMessage()); // e.g. "unknown_device"
         } catch (Exception e) {
             log.error("Failed to process message", e);
             publishNegativeAck("processing_error");
         }
     }
 
-
     @Override
-    public void deliveryComplete(org.eclipse.paho.mqttv5.client.IMqttToken token) { /* no-op */ }
-
-    @Override
-    public void authPacketArrived(int reasonCode, org.eclipse.paho.mqttv5.common.packet.MqttProperties properties) { /* no-op */ }
-
-    // ---------- Reconnect logic ----------
-
-    private void scheduleReconnect() {
-        if (reconnecting) return;
-        reconnecting = true;
-        long delay = backoffMs;
-        log.warn("Scheduling reconnect in {} ms", delay);
-        scheduler.schedule(this::attemptReconnect, delay, TimeUnit.MILLISECONDS);
-        // próximo backoff
-        backoffMs = Math.min((long) (backoffMs * 1.8), backoffMaxMs);
+    public void deliveryComplete(org.eclipse.paho.mqttv5.client.IMqttToken token) {
+        log.debug("MQTT deliveryComplete: {}", token.getMessageId());
     }
 
-    private void attemptReconnect() {
-        try {
-            if (client == null) {
-                connectAndSubscribe();
-                return;
-            }
-            if (!client.isConnected()) {
-                log.info("Attempting MQTT reconnect...");
-                client.reconnect(); // si falla, lanzará excepción y reprogramamos
-            }
-            // Si reconectó, reseteamos estado/backoff en connectComplete()
-        } catch (Exception e) {
-            log.warn("Reconnect attempt failed: {}", e.getMessage());
-            reconnecting = false; // para poder volver a programar
-            scheduleReconnect();
-        }
-    }
-
+    // -------------------------------------------------------------------------
+    // ACK / NACK helpers
+    // -------------------------------------------------------------------------
 
     private void publishNegativeAck(String reason) {
         try {
-            if (props.topicAck() == null || props.topicAck().isBlank()) return;
+            if (props.topicAck() == null || props.topicAck().isBlank()) {
+                return;
+            }
             ObjectNode ack = mapper.createObjectNode();
             ack.put("ok", false);
             ack.put("reason", reason);
             String payload = mapper.writeValueAsString(ack);
-            MqttMessage msg = new MqttMessage(payload.getBytes(java.nio.charset.StandardCharsets.UTF_8));
+
+            MqttMessage msg = new MqttMessage(payload.getBytes(StandardCharsets.UTF_8));
             msg.setQos(props.qos());
             client.publish(props.topicAck(), msg);
-            log.debug("Published NACK to {}: {}", props.topicAck(), payload);
+            log.debug("Published negative ACK to {}: {}", props.topicAck(), payload);
         } catch (Exception e) {
             log.warn("Failed to publish negative ACK: {}", e.getMessage());
         }
     }
 
-    @Scheduled(fixedDelayString = "${mqtt.reconnect.check-interval-ms:5000}")
-    public void ensureConnectedTask() {
+    // -------------------------------------------------------------------------
+    // ClientId helper
+    // -------------------------------------------------------------------------
+
+    /**
+     * Build a unique clientId derived from the configured base clientId.
+     * This avoids "Session taken over" (142) when running multiple instances
+     * with the same configuration.
+     */
+    private static String buildClientId(MqttProps props) {
+        String base = props.clientId();
+        if (base == null || base.isBlank()) {
+            base = "mdt-client";
+        }
+
+        String host = "unknown";
         try {
-            ensureClient();
-            if (client.isConnected()) return;
-
-            log.info("MQTT not connected, attempting reconnect...");
-            MqttConnectionOptions opts = new MqttConnectionOptions();
-            opts.setCleanStart(props.cleanStart());
-            opts.setAutomaticReconnect(true);
-
-            client.connect(opts); // si falla, cae al catch
-            everConnected.set(true);
-
-            // Re-suscribir si no lo haces en connectComplete
-            if (props.topicPass() != null && !props.topicPass().isBlank()) {
-                client.subscribe(props.topicPass(), props.qos());
-                log.info("Re-subscribed to topic {}", props.topicPass());
-            }
-        } catch (Throwable e) {
-            log.warn("MQTT reconnect attempt failed: {}", e.getMessage());
+            host = InetAddress.getLocalHost().getHostName();
+        } catch (Exception ignored) {
         }
-    }
 
-    private synchronized void ensureClient() throws Exception {
-        if (client == null) {
-            // Usa tus props actuales
-            client = new MqttAsyncClient(props.brokerUrl(), props.clientId(), new MemoryPersistence());
-
-            // Si tienes callbacks personalizados, configúralos aquí.
-            // Por ejemplo, onDisconnect / connectComplete / messageArrived ya los tienes en tu clase.
-            client.setCallback(this);
+        String pid = "unknown";
+        try {
+            pid = ManagementFactory.getRuntimeMXBean().getName().split("@")[0];
+        } catch (Exception ignored) {
         }
+
+        String suffix = UUID.randomUUID().toString().substring(0, 8);
+
+        return base + "-" + host + "-" + pid + "-" + suffix;
     }
 }

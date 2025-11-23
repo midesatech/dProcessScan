@@ -8,9 +8,14 @@ Mapeo:
 - STAGE → ubicacion_id
 - DEVICE/DEVICE_ID → lector_id (dígitos iniciales; "101-AB"→101)
 - Cada CSN → fila; CSN→epc; rssi = int(hex últimos 2); MACHINE→machine
-Ejecutar:
+
+Ejecutar con docker: (servicio, base de datos y mosquitto)
 ```
-docker compose up -d
+docker-compose -f docker-compose-full.yml up -d
+```
+
+Ejecutar solo el servicio:
+```
 gradle bootRun   # o ./gradlew si añades wrapper
 ```
 Publicar ejemplo:
